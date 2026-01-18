@@ -59,6 +59,282 @@ const Chip8 = struct {
     isKeyDown: *const fn (key: Keypad) bool,
     getKeyPressed: *const fn () ?Keypad,
     getRandomNumber: *const fn (min: i32, max: i32) i32,
+
+    pub fn step(self: *Chip8) void {
+        switch (self.state) {
+            .running => {
+                self.executeNextInstruction();
+            },
+            .waiting_for_keypress => {
+                if (self.getKeyPressed()) |key| {
+                    self.v[self.next_key_x] = @intFromEnum(key);
+                    self.state = .running;
+                }
+            },
+        }
+    }
+
+    // TODO: Maybe use an enum for the opcodes instead of u16?
+    fn getNextInstruction(self: *Chip8) u16 {
+        assert(self.pc >= PC_START);
+        assert(self.pc < MEMORY_SIZE);
+
+        var instruction: u16 = @as(u16, self.memory[self.pc]) << 0x08;
+        instruction += self.memory[self.pc + 1];
+
+        self.pc += 2;
+
+        return instruction;
+    }
+
+    fn executeNextInstruction(self: *Chip8) void {
+        const instruction = self.getNextInstruction();
+
+        switch (instruction) {
+            0x00E0 => {
+                self.framebuffer = getClearedFramebuffer();
+            },
+            0x00EE => {
+                self.pc = self.stack[self.sp];
+                self.sp -= 1; // TODO: Should we handle underflows?
+            },
+            0x1000...0x1FFF => {
+                // TODO: Should we allow PC to be set to 0x000-0x1FF? Should we handle that or just let the world burn?
+                self.pc = instruction - 0x1000;
+            },
+            0x2000...0x2FFF => {
+                self.sp += 1; // TODO: Should we handle overflows?
+                self.stack[self.sp] = self.pc;
+                self.pc = instruction - 0x2000;
+            },
+            0x3000...0x3FFF => {
+                const x: usize = (instruction >> 0x08) - 0x30;
+                const kk = instruction & 0x00FF;
+
+                if (self.v[x] == kk) {
+                    self.pc += 2;
+                }
+            },
+            0x4000...0x4FFF => {
+                const x: usize = (instruction >> 0x08) - 0x40;
+                const kk = instruction & 0x00FF;
+
+                if (self.v[x] != kk) {
+                    self.pc += 2;
+                }
+            },
+            0x5000...0x5FF0 => {
+                if (instruction & 0x000F == 0) {
+                    const x: usize = (instruction >> 0x08) - 0x50;
+                    const y: usize = (instruction & 0x00F0) >> 0x04;
+
+                    if (self.v[x] == self.v[y]) {
+                        self.pc += 2;
+                    }
+                }
+            },
+            0x6000...0x6FFF => {
+                const x: usize = (instruction >> 0x08) - 0x60;
+                const kk: u8 = @intCast(instruction & 0x00FF);
+
+                self.v[x] = kk;
+            },
+            0x7000...0x7FFF => {
+                const x: usize = (instruction >> 0x08) - 0x70;
+                const kk: u8 = @intCast(instruction & 0x00FF);
+
+                self.v[x] += kk;
+            },
+            0x8000...0x8FFF => {
+                const x: usize = (instruction >> 0x08) - 0x80;
+                const y: usize = (instruction & 0x00F0) >> 0x04;
+
+                const instruction_variant = instruction & 0x000F;
+                switch (instruction_variant) {
+                    0x0 => {
+                        self.v[x] = self.v[y];
+                    },
+                    0x1 => {
+                        self.v[x] |= self.v[y];
+                    },
+                    0x2 => {
+                        self.v[x] &= self.v[y];
+                    },
+                    0x3 => {
+                        self.v[x] ^= self.v[y];
+                    },
+                    0x4 => {
+                        const res, const carry = @addWithOverflow(self.v[x], self.v[y]);
+                        self.v[x] = res;
+                        self.v[0xF] = carry;
+                    },
+                    0x5 => {
+                        const res, const carry = @subWithOverflow(self.v[x], self.v[y]);
+                        self.v[x] = res;
+                        self.v[0xF] = carry ^ 0x1; // TODO: Validate this!
+                    },
+                    0x6 => {
+                        // According to Cowdog's http://devernay.free.fr/hacks/chip8/C8TECH10.HTM#8xy6 this instruction
+                        // sets Vx = Vx >> 1.
+                        // On the other hand, Matthew Mikolay
+                        // (https://github.com/mattmikolay/chip-8/wiki/CHIP%E2%80%908-Instruction-Set) says that's a mistake
+                        // and the instruction should, instead, do `Vx = Vy >> 1`. We're following Matthew's documentation
+                        // for the time being. If this proves to be inconsistent with a large number of roms out there this
+                        // might be updated.
+                        const vy_lsb = self.v[y] & 0b00000001;
+                        self.v[x] = self.v[y] >> 0x1;
+                        self.v[0xF] = vy_lsb;
+                    },
+                    0x7 => {
+                        const res, const carry = @subWithOverflow(self.v[y], self.v[x]);
+                        self.v[x] = res;
+                        self.v[0xF] = carry ^ 0x1; // TODO: Validate this!
+                    },
+                    0xE => {
+                        // Similarly to 0x6's case, there's a discrepancy in how this should be handled in online
+                        // documentation sources. Again, we're following Matthew's take here and setting `Vx = Vy << 1`.
+                        const vy_msb = self.v[y] & 0b10000000;
+                        self.v[x] = self.v[y] << 0x1;
+                        self.v[0xF] = vy_msb;
+                    },
+                    else => unreachable,
+                }
+            },
+            0x9000...0x9FF0 => {
+                if (instruction & 0x000F == 0) {
+                    const x: usize = (instruction >> 0x08) - 0x90;
+                    const y: usize = (instruction & 0x00F0) >> 0x04;
+
+                    if (self.v[x] != self.v[y]) {
+                        self.pc += 2;
+                    }
+                }
+            },
+            0xA000...0xAFFF => {
+                self.i = instruction - 0xA000;
+            },
+            0xB000...0xBFFF => {
+                self.pc = (instruction - 0xB000) + self.v[0];
+            },
+            0xC000...0xCFFF => {
+                const x: usize = (instruction >> 0x08) - 0xC0;
+                const n: u8 = @intCast(instruction & 0x00FF);
+                const rnd: u8 = @intCast(self.getRandomNumber(0x00, 0xFF));
+
+                self.v[x] = rnd & n;
+            },
+            0xD000...0xDFFF => {
+                const x: usize = (instruction >> 0x08) - 0xD0;
+                const y: usize = (instruction & 0x00F0) >> 0x04;
+                const n: u4 = @intCast(instruction & 0x000F);
+
+                const vx = self.v[x];
+                const vy = self.v[y];
+
+                var collision_detected = false;
+                for (0..n) |y_offset| {
+                    // TODO: What is `I + fb_y` goes beyond memory?
+                    const sprite = self.memory[self.i + y_offset];
+
+                    for (0..8) |x_offset| {
+                        const bitshift_operand: u3 = @intCast(x_offset);
+                        const sprite_pixel: u1 = @intCast(sprite >> (0x07 - bitshift_operand) & 0x01);
+                        const fb_x = (vx + x_offset) % FRAMEBUFFER_WIDTH;
+                        const fb_y = (vy + y_offset) % FRAMEBUFFER_WIDTH;
+                        const fb_pixel = &self.framebuffer[fb_x][fb_y];
+
+                        if (sprite_pixel == 1 and fb_pixel.* == 1) {
+                            collision_detected = true;
+                        }
+
+                        fb_pixel.* ^= sprite_pixel;
+                    }
+                }
+
+                if (collision_detected) {
+                    self.v[0xF] = 1;
+                }
+            },
+            0xE000...0xEFFF => {
+                const x: usize = (instruction >> 0x08) - 0xE0;
+
+                const instruction_variant = instruction & 0x00FF;
+                switch (instruction_variant) {
+                    0x9E => {
+                        const key: Keypad = @enumFromInt(self.v[x]);
+                        if (self.isKeyDown(key)) {
+                            self.pc += 2;
+                        }
+                    },
+                    0xA1 => {
+                        const key: Keypad = @enumFromInt(self.v[x]);
+                        if (!self.isKeyDown(key)) {
+                            self.pc += 2;
+                        }
+                    },
+                    else => unreachable,
+                }
+            },
+            0xF000...0xFFFF => {
+                const x: usize = (instruction >> 0x08) - 0xF0;
+
+                const instruction_variant = instruction & 0x00FF;
+                switch (instruction_variant) {
+                    0x07 => {
+                        self.v[x] = self.dt;
+                    },
+                    0x0A => {
+                        self.state = .waiting_for_keypress;
+                        self.next_key_x = x;
+                    },
+                    0x15 => {
+                        self.dt = self.v[x];
+                    },
+                    0x18 => {
+                        self.st = self.v[x];
+                    },
+                    0x1E => {
+                        self.i += self.v[x];
+                    },
+                    0x29 => {
+                        // TODO: Should we handle cases for vx > 0x0F? For now we won't.
+                        self.i = 5 * self.v[x];
+                    },
+                    0x33 => {
+                        const vx = self.v[x];
+                        const hundreds: u4 = @intCast(vx / 100);
+                        const tens: u4 = @intCast((vx % 100) / 10);
+                        const ones: u4 = @intCast(vx % 10);
+
+                        const i = self.i;
+                        self.memory[i] = hundreds;
+                        self.memory[i + 1] = tens;
+                        self.memory[i + 2] = ones;
+                    },
+                    0x55 => {
+                        for (0..x + 1) |n| {
+                            self.memory[self.i + n] = self.v[n];
+                        }
+
+                        // Another difference in documentation. According to Matthew we should ALSO adjust the I register
+                        // at the end of this instruction.
+                        self.i += @as(u16, @intCast(x)) + 1;
+                    },
+                    0x65 => {
+                        for (0..x + 1) |n| {
+                            self.v[n] = self.memory[self.i + n];
+                        }
+
+                        // Another difference in documentation. According to Matthew we should ALSO adjust the I register
+                        // at the end of this instruction.
+                        self.i += @as(u16, @intCast(x)) + 1;
+                    },
+                    else => unreachable,
+                }
+            },
+            else => unreachable,
+        }
+    }
 };
 
 /// An 8x5 representation of the default fonts for the CHIP-8 emulator.
@@ -126,280 +402,4 @@ pub fn initializeChip8(is_key_down_fn: *const fn (key: Keypad) bool, get_key_pre
     @memcpy(chip8.memory[0x200..0x20E], rom[0..14]);
 
     return chip8;
-}
-
-pub fn step(chip8: *Chip8) void {
-    switch (chip8.state) {
-        .running => {
-            executeNextInstruction(chip8);
-        },
-        .waiting_for_keypress => {
-            if (chip8.getKeyPressed()) |key| {
-                chip8.v[chip8.next_key_x] = @intFromEnum(key);
-                chip8.state = .running;
-            }
-        },
-    }
-}
-
-// TODO: Maybe use an enum for the opcodes instead of u16?
-fn getNextInstruction(chip8: *Chip8) u16 {
-    assert(chip8.pc >= PC_START);
-    assert(chip8.pc < MEMORY_SIZE);
-
-    var instruction: u16 = @as(u16, chip8.memory[chip8.pc]) << 0x08;
-    instruction += chip8.memory[chip8.pc + 1];
-
-    chip8.pc += 2;
-
-    return instruction;
-}
-
-fn executeNextInstruction(chip8: *Chip8) void {
-    const instruction = getNextInstruction(chip8);
-
-    switch (instruction) {
-        0x00E0 => {
-            chip8.framebuffer = getClearedFramebuffer();
-        },
-        0x00EE => {
-            chip8.pc = chip8.stack[chip8.sp];
-            chip8.sp -= 1; // TODO: Should we handle underflows?
-        },
-        0x1000...0x1FFF => {
-            // TODO: Should we allow PC to be set to 0x000-0x1FF? Should we handle that or just let the world burn?
-            chip8.pc = instruction - 0x1000;
-        },
-        0x2000...0x2FFF => {
-            chip8.sp += 1; // TODO: Should we handle overflows?
-            chip8.stack[chip8.sp] = chip8.pc;
-            chip8.pc = instruction - 0x2000;
-        },
-        0x3000...0x3FFF => {
-            const x: usize = (instruction >> 0x08) - 0x30;
-            const kk = instruction & 0x00FF;
-
-            if (chip8.v[x] == kk) {
-                chip8.pc += 2;
-            }
-        },
-        0x4000...0x4FFF => {
-            const x: usize = (instruction >> 0x08) - 0x40;
-            const kk = instruction & 0x00FF;
-
-            if (chip8.v[x] != kk) {
-                chip8.pc += 2;
-            }
-        },
-        0x5000...0x5FF0 => {
-            if (instruction & 0x000F == 0) {
-                const x: usize = (instruction >> 0x08) - 0x50;
-                const y: usize = (instruction & 0x00F0) >> 0x04;
-
-                if (chip8.v[x] == chip8.v[y]) {
-                    chip8.pc += 2;
-                }
-            }
-        },
-        0x6000...0x6FFF => {
-            const x: usize = (instruction >> 0x08) - 0x60;
-            const kk: u8 = @intCast(instruction & 0x00FF);
-
-            chip8.v[x] = kk;
-        },
-        0x7000...0x7FFF => {
-            const x: usize = (instruction >> 0x08) - 0x70;
-            const kk: u8 = @intCast(instruction & 0x00FF);
-
-            chip8.v[x] += kk;
-        },
-        0x8000...0x8FFF => {
-            const x: usize = (instruction >> 0x08) - 0x80;
-            const y: usize = (instruction & 0x00F0) >> 0x04;
-
-            const instruction_variant = instruction & 0x000F;
-            switch (instruction_variant) {
-                0x0 => {
-                    chip8.v[x] = chip8.v[y];
-                },
-                0x1 => {
-                    chip8.v[x] |= chip8.v[y];
-                },
-                0x2 => {
-                    chip8.v[x] &= chip8.v[y];
-                },
-                0x3 => {
-                    chip8.v[x] ^= chip8.v[y];
-                },
-                0x4 => {
-                    const res, const carry = @addWithOverflow(chip8.v[x], chip8.v[y]);
-                    chip8.v[x] = res;
-                    chip8.v[0xF] = carry;
-                },
-                0x5 => {
-                    const res, const carry = @subWithOverflow(chip8.v[x], chip8.v[y]);
-                    chip8.v[x] = res;
-                    chip8.v[0xF] = carry ^ 0x1; // TODO: Validate this!
-                },
-                0x6 => {
-                    // According to Cowdog's http://devernay.free.fr/hacks/chip8/C8TECH10.HTM#8xy6 this instruction
-                    // sets Vx = Vx >> 1.
-                    // On the other hand, Matthew Mikolay
-                    // (https://github.com/mattmikolay/chip-8/wiki/CHIP%E2%80%908-Instruction-Set) says that's a mistake
-                    // and the instruction should, instead, do `Vx = Vy >> 1`. We're following Matthew's documentation
-                    // for the time being. If this proves to be inconsistent with a large number of roms out there this
-                    // might be updated.
-                    const vy_lsb = chip8.v[y] & 0b00000001;
-                    chip8.v[x] = chip8.v[y] >> 0x1;
-                    chip8.v[0xF] = vy_lsb;
-                },
-                0x7 => {
-                    const res, const carry = @subWithOverflow(chip8.v[y], chip8.v[x]);
-                    chip8.v[x] = res;
-                    chip8.v[0xF] = carry ^ 0x1; // TODO: Validate this!
-                },
-                0xE => {
-                    // Similarly to 0x6's case, there's a discrepancy in how this should be handled in online
-                    // documentation sources. Again, we're following Matthew's take here and setting `Vx = Vy << 1`.
-                    const vy_msb = chip8.v[y] & 0b10000000;
-                    chip8.v[x] = chip8.v[y] << 0x1;
-                    chip8.v[0xF] = vy_msb;
-                },
-                else => unreachable,
-            }
-        },
-        0x9000...0x9FF0 => {
-            if (instruction & 0x000F == 0) {
-                const x: usize = (instruction >> 0x08) - 0x90;
-                const y: usize = (instruction & 0x00F0) >> 0x04;
-
-                if (chip8.v[x] != chip8.v[y]) {
-                    chip8.pc += 2;
-                }
-            }
-        },
-        0xA000...0xAFFF => {
-            chip8.i = instruction - 0xA000;
-        },
-        0xB000...0xBFFF => {
-            chip8.pc = (instruction - 0xB000) + chip8.v[0];
-        },
-        0xC000...0xCFFF => {
-            const x: usize = (instruction >> 0x08) - 0xC0;
-            const n: u8 = @intCast(instruction & 0x00FF);
-            const rnd: u8 = @intCast(chip8.getRandomNumber(0x00, 0xFF));
-
-            chip8.v[x] = rnd & n;
-        },
-        0xD000...0xDFFF => {
-            const x: usize = (instruction >> 0x08) - 0xD0;
-            const y: usize = (instruction & 0x00F0) >> 0x04;
-            const n: u4 = @intCast(instruction & 0x000F);
-
-            const vx = chip8.v[x];
-            const vy = chip8.v[y];
-
-            var collision_detected = false;
-            for (0..n) |y_offset| {
-                // TODO: What is `I + fb_y` goes beyond memory?
-                const sprite = chip8.memory[chip8.i + y_offset];
-
-                for (0..8) |x_offset| {
-                    const bitshift_operand: u3 = @intCast(x_offset);
-                    const sprite_pixel: u1 = @intCast(sprite >> (0x07 - bitshift_operand) & 0x01);
-                    const fb_x = (vx + x_offset) % FRAMEBUFFER_WIDTH;
-                    const fb_y = (vy + y_offset) % FRAMEBUFFER_WIDTH;
-                    const fb_pixel = &chip8.framebuffer[fb_x][fb_y];
-
-                    if (sprite_pixel == 1 and fb_pixel.* == 1) {
-                        collision_detected = true;
-                    }
-
-                    fb_pixel.* ^= sprite_pixel;
-                }
-            }
-
-            if (collision_detected) {
-                chip8.v[0xF] = 1;
-            }
-        },
-        0xE000...0xEFFF => {
-            const x: usize = (instruction >> 0x08) - 0xE0;
-
-            const instruction_variant = instruction & 0x00FF;
-            switch (instruction_variant) {
-                0x9E => {
-                    const key: Keypad = @enumFromInt(chip8.v[x]);
-                    if (chip8.isKeyDown(key)) {
-                        chip8.pc += 2;
-                    }
-                },
-                0xA1 => {
-                    const key: Keypad = @enumFromInt(chip8.v[x]);
-                    if (!chip8.isKeyDown(key)) {
-                        chip8.pc += 2;
-                    }
-                },
-                else => unreachable,
-            }
-        },
-        0xF000...0xFFFF => {
-            const x: usize = (instruction >> 0x08) - 0xF0;
-
-            const instruction_variant = instruction & 0x00FF;
-            switch (instruction_variant) {
-                0x07 => {
-                    chip8.v[x] = chip8.dt;
-                },
-                0x0A => {
-                    chip8.state = .waiting_for_keypress;
-                    chip8.next_key_x = x;
-                },
-                0x15 => {
-                    chip8.dt = chip8.v[x];
-                },
-                0x18 => {
-                    chip8.st = chip8.v[x];
-                },
-                0x1E => {
-                    chip8.i += chip8.v[x];
-                },
-                0x29 => {
-                    // TODO: Should we handle cases for vx > 0x0F? For now we won't.
-                    chip8.i = 5 * chip8.v[x];
-                },
-                0x33 => {
-                    const vx = chip8.v[x];
-                    const hundreds: u4 = @intCast(vx / 100);
-                    const tens: u4 = @intCast((vx % 100) / 10);
-                    const ones: u4 = @intCast(vx % 10);
-
-                    const i = chip8.i;
-                    chip8.memory[i] = hundreds;
-                    chip8.memory[i + 1] = tens;
-                    chip8.memory[i + 2] = ones;
-                },
-                0x55 => {
-                    for (0..x + 1) |n| {
-                        chip8.memory[chip8.i + n] = chip8.v[n];
-                    }
-
-                    // Another difference in documentation. According to Matthew we should ALSO adjust the I register
-                    // at the end of this instruction.
-                    chip8.i += @as(u16, @intCast(x)) + 1;
-                },
-                0x65 => {
-                    for (0..x + 1) |n| {
-                        chip8.v[n] = chip8.memory[chip8.i + n];
-                    }
-
-                    // Another difference in documentation. According to Matthew we should ALSO adjust the I register
-                    // at the end of this instruction.
-                    chip8.i += @as(u16, @intCast(x)) + 1;
-                },
-                else => unreachable,
-            }
-        },
-        else => unreachable,
-    }
 }

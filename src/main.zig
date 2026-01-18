@@ -24,7 +24,7 @@ pub fn main() !void {
 
     while (!rl.windowShouldClose()) {
         for (0..11) |_| {
-            m8.step(&chip8);
+            chip8.step();
         }
 
         rl.beginDrawing();
