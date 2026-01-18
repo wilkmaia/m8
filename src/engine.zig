@@ -11,6 +11,25 @@ const PC_START: usize = 0x200;
 const STACK_SIZE: usize = 0x10;
 const V_REGISTERS: usize = 0x10;
 
+pub const Keypad = enum(u4) {
+    k_0 = 0x0,
+    k_1 = 0x1,
+    k_2 = 0x2,
+    k_3 = 0x3,
+    k_4 = 0x4,
+    k_5 = 0x5,
+    k_6 = 0x6,
+    k_7 = 0x7,
+    k_8 = 0x8,
+    k_9 = 0x9,
+    k_A = 0xA,
+    k_B = 0xB,
+    k_C = 0xC,
+    k_D = 0xD,
+    k_E = 0xE,
+    k_F = 0xF,
+};
+
 /// Data modeling for the CHIP-8 architecture. It contains references to its registers, the stack and memory.
 const Chip8 = struct {
     memory: [MEMORY_SIZE]u8,
@@ -21,6 +40,11 @@ const Chip8 = struct {
     pc: u16,
     sp: u8,
     stack: [STACK_SIZE]u16,
+
+    drawPixel: fn (x: i32, y: i32, is_active: bool) void,
+    clearScreen: fn () void,
+    isKeyDown: fn (key: Keypad) bool,
+    getKeyPressed: fn () ?Keypad,
 };
 
 /// An 8x5 representation of the default fonts for the CHIP-8 emulator.
@@ -44,7 +68,7 @@ const fonts = [0x50]u8{
 };
 
 /// Initialize the data model elements of the engine with sane defaults.
-fn initializeChip8() Chip8 {
+pub fn initializeChip8(comptime draw_pixel_fn: fn (x: i32, y: i32, is_active: bool) void, comptime clear_screen_fn: fn () void, comptime is_key_down_fn: fn (key: Keypad) bool, comptime get_key_pressed_fn: fn () ?Keypad) Chip8 {
     return .{
         .memory = fonts ++ ([_]u8{0} ** (MEMORY_SIZE - fonts.len)),
         .v = [_]u8{0} ** V_REGISTERS,
@@ -54,6 +78,11 @@ fn initializeChip8() Chip8 {
         .pc = PC_START,
         .sp = 0,
         .stack = [_]u16{0} ** STACK_SIZE,
+
+        .drawPixel = draw_pixel_fn,
+        .clearScreen = clear_screen_fn,
+        .isKeyDown = is_key_down_fn,
+        .getKeyPressed = get_key_pressed_fn,
     };
 }
 
