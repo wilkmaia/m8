@@ -46,7 +46,7 @@ const ExecutionState = enum(u4) {
 };
 
 /// Data modeling for the CHIP-8 architecture. It contains references to its registers, the stack and memory.
-const Chip8 = struct {
+pub const Chip8 = struct {
     state: ExecutionState,
 
     memory: [MEMORY_SIZE]u8,
@@ -65,6 +65,14 @@ const Chip8 = struct {
     isKeyDown: *const fn (key: Keypad) bool,
     getKeyPressed: *const fn () ?Keypad,
     getRandomNumber: *const fn (min: i32, max: i32) i32,
+
+    pub fn loadRom(self: *Chip8, rom: []u8, size: u64) void {
+        if (size > MEMORY_SIZE - PC_START) {
+            std.debug.panic("Tried loading {} bytes of memory. Max allowed: {}.\n", .{ size, MEMORY_SIZE - PC_START });
+        }
+
+        std.mem.copyForwards(u8, self.memory[0x200..], rom);
+    }
 
     pub fn decreaseDelayTimer(self: *Chip8) void {
         if (self.dt == 0) {
@@ -165,7 +173,7 @@ const Chip8 = struct {
                 const x: usize = (instruction >> 0x08) - 0x70;
                 const kk: u8 = @intCast(instruction & 0x00FF);
 
-                self.v[x] += kk;
+                self.v[x] +%= kk;
             },
             0x8000...0x8FFF => {
                 const x: usize = (instruction >> 0x08) - 0x80;
@@ -390,7 +398,7 @@ pub fn initializeChip8(is_key_down_fn: *const fn (key: Keypad) bool, get_key_pre
         raw_sound_wave[n] = @intFromFloat(std.math.maxInt(i16) * std.math.sin(2 * std.math.pi * SOUND_SAMPLE_FREQUENCY * @as(f32, @floatFromInt(n)) / SOUND_SAMPLE_RATE));
     }
 
-    var chip8: Chip8 = .{
+    return .{
         .state = .running,
         .memory = fonts ++ ([_]u8{0} ** (MEMORY_SIZE - fonts.len)),
         .v = [_]u8{0} ** V_REGISTERS,
@@ -409,30 +417,4 @@ pub fn initializeChip8(is_key_down_fn: *const fn (key: Keypad) bool, get_key_pre
         .getKeyPressed = get_key_pressed_fn,
         .getRandomNumber = get_random_number_fn,
     };
-
-    // This is a test program to validate the rendering to the screen is working as expected.
-    // All it does is:
-    // - clears the screen;
-    // - set V6 = 255;
-    // - set ST = V6 (this should trigger the beep sound for ~4.25 seconds);
-    // - wait for a key input;
-    // - store that input in V5;
-    // - set I to the location of the sprite for the digit stored in V5;
-    // - set V0 and V1 to `0x10`;
-    // - draw 5 bytes, starting from I, to (V0, V1);
-    // - wait for another input (serves as a halting mechanism).
-    const rom: [18]u8 = .{
-        0x00, 0xE0,
-        0x66, 0xFF,
-        0xF6, 0x18,
-        0xF5, 0x0A,
-        0xF5, 0x29,
-        0x60, 0x10,
-        0x61, 0x10,
-        0xD0, 0x15,
-        0xF8, 0x0A,
-    };
-    @memcpy(chip8.memory[0x200..0x212], rom[0..18]);
-
-    return chip8;
 }

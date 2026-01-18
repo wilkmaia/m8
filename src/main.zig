@@ -33,24 +33,42 @@ pub fn main() !void {
     rl.setTargetFPS(TARGET_FRAME_RATE);
     rl.setSoundVolume(monotoneSound, 0.2);
 
+    var is_emulation_paused = true;
+    // For some test roms, see https://github.com/mattmikolay/chip-8?tab=readme-ov-file.
+    const rom_absolute_path = "/home/wilkmaia/code/m8/demos/chipquarium.ch8";
+
     while (!rl.windowShouldClose()) {
-        if (chip8.dt > 0) {
-            chip8.decreaseDelayTimer();
+        if (rl.isKeyPressed(.p)) {
+            std.debug.print("Pressed P\n", .{});
+            is_emulation_paused ^= true;
+            std.debug.print("Is emulation pause? {}\n", .{is_emulation_paused});
         }
 
-        if (chip8.st > 0) {
-            chip8.decreaseSoundTimer();
+        if (rl.isKeyPressed(.l)) {
+            std.debug.print("Pressed L\n", .{});
+            try loadRom(&chip8, rom_absolute_path);
+            std.debug.print("Loaded {s}.\n", .{rom_absolute_path});
+        }
 
-            if (!rl.isSoundPlaying(monotoneSound)) {
-                rl.playSound(monotoneSound);
+        if (!is_emulation_paused) {
+            if (chip8.dt > 0) {
+                chip8.decreaseDelayTimer();
             }
-        } else if (chip8.st == 0 and rl.isSoundPlaying(monotoneSound)) {
-            rl.stopSound(monotoneSound);
-        }
 
-        // Execute 11 instructions on every frame draw (~660 ips).
-        for (0..11) |_| {
-            chip8.step();
+            if (chip8.st > 0) {
+                chip8.decreaseSoundTimer();
+
+                if (!rl.isSoundPlaying(monotoneSound)) {
+                    rl.playSound(monotoneSound);
+                }
+            } else if (chip8.st == 0 and rl.isSoundPlaying(monotoneSound)) {
+                rl.stopSound(monotoneSound);
+            }
+
+            // Execute 11 instructions on every frame draw (~660 ips).
+            for (0..11) |_| {
+                chip8.step();
+            }
         }
 
         rl.beginDrawing();
@@ -135,6 +153,23 @@ fn getKeyPressed() ?m8.Keypad {
     };
 }
 
+/// Gets a random integer number between `min` and `max` (inclusive).
 fn getRandomNumber(min: i32, max: i32) i32 {
     return rl.getRandomValue(min, max);
+}
+
+/// Load the binary data at `absolute_path` into m8's memory.
+fn loadRom(chip8: *m8.Chip8, absolute_path: []const u8) !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer std.debug.assert(gpa.deinit() == .ok);
+    const allocator = gpa.allocator();
+
+    var file = try std.fs.openFileAbsolute(absolute_path, .{});
+    defer file.close();
+
+    const stat = try file.stat();
+    const buffer = try file.readToEndAlloc(allocator, stat.size);
+    defer allocator.free(buffer);
+
+    chip8.loadRom(buffer, stat.size);
 }
