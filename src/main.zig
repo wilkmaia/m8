@@ -9,20 +9,46 @@ const PIXEL_INACTIVE_COLOR: rl.Color = .black;
 const TARGET_FRAME_RATE: i32 = 60;
 
 pub fn main() !void {
-    // TODO: To be configurable by the user.
-    rl.setConfigFlags(.{ .vsync_hint = true });
+    var chip8 = m8.initializeChip8(isKeyDown, getKeyPressed, getRandomNumber);
 
     const screenWidth = m8.FRAMEBUFFER_WIDTH * PIXEL_SIZE;
     const screenHeight = m8.FRAMEBUFFER_HEIGHT * PIXEL_SIZE;
     rl.initWindow(screenWidth, screenHeight, "m8 - CHIP-8 Emulator");
     defer rl.closeWindow();
 
-    // TODO: To be configurable by the user.
-    rl.setTargetFPS(TARGET_FRAME_RATE);
+    rl.initAudioDevice();
+    defer rl.closeAudioDevice();
 
-    var chip8 = m8.initializeChip8(isKeyDown, getKeyPressed, getRandomNumber);
+    const soundWave = rl.Wave{
+        .channels = 1,
+        .data = &chip8.raw_sound_wave,
+        .frameCount = m8.SAMPLES,
+        .sampleRate = m8.SOUND_SAMPLE_RATE,
+        .sampleSize = 16,
+    };
+    const monotoneSound = rl.loadSoundFromWave(soundWave);
+
+    // TODO: To be configurable by the user.
+    rl.setConfigFlags(.{ .vsync_hint = true });
+    rl.setTargetFPS(TARGET_FRAME_RATE);
+    rl.setSoundVolume(monotoneSound, 0.2);
 
     while (!rl.windowShouldClose()) {
+        if (chip8.dt > 0) {
+            chip8.decreaseDelayTimer();
+        }
+
+        if (chip8.st > 0) {
+            chip8.decreaseSoundTimer();
+
+            if (!rl.isSoundPlaying(monotoneSound)) {
+                rl.playSound(monotoneSound);
+            }
+        } else if (chip8.st == 0 and rl.isSoundPlaying(monotoneSound)) {
+            rl.stopSound(monotoneSound);
+        }
+
+        // Execute 11 instructions on every frame draw (~660 ips).
         for (0..11) |_| {
             chip8.step();
         }
@@ -31,8 +57,11 @@ pub fn main() !void {
         defer rl.endDrawing();
 
         clearScreen();
-
         drawFramebuffer(&chip8.framebuffer);
+    }
+
+    if (rl.isSoundPlaying(monotoneSound)) {
+        rl.stopSound(monotoneSound);
     }
 }
 

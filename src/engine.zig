@@ -11,6 +11,11 @@ const PC_START: usize = 0x200;
 const STACK_SIZE: usize = 0x10;
 const V_REGISTERS: usize = 0x10;
 
+pub const SOUND_SAMPLE_RATE: f64 = 44_100;
+pub const SOUND_SAMPLE_FREQUENCY: f64 = 440;
+pub const SAMPLES: usize = 187_425; // 4.25 * 44_100
+pub const RawSoundWave = [SAMPLES]i16;
+
 pub const FRAMEBUFFER_WIDTH: usize = 0x40;
 pub const FRAMEBUFFER_HEIGHT: usize = 0x20;
 
@@ -55,10 +60,27 @@ const Chip8 = struct {
     framebuffer: Framebuffer,
 
     next_key_x: usize,
+    raw_sound_wave: RawSoundWave,
 
     isKeyDown: *const fn (key: Keypad) bool,
     getKeyPressed: *const fn () ?Keypad,
     getRandomNumber: *const fn (min: i32, max: i32) i32,
+
+    pub fn decreaseDelayTimer(self: *Chip8) void {
+        if (self.dt == 0) {
+            return;
+        }
+
+        self.dt -= 1;
+    }
+
+    pub fn decreaseSoundTimer(self: *Chip8) void {
+        if (self.st == 0) {
+            return;
+        }
+
+        self.st -= 1;
+    }
 
     pub fn step(self: *Chip8) void {
         switch (self.state) {
@@ -363,6 +385,11 @@ fn getClearedFramebuffer() Framebuffer {
 
 /// Initialize the data model elements of the engine with sane defaults.
 pub fn initializeChip8(is_key_down_fn: *const fn (key: Keypad) bool, get_key_pressed_fn: *const fn () ?Keypad, get_random_number_fn: *const fn (min: i32, max: i32) i32) Chip8 {
+    var raw_sound_wave: RawSoundWave = .{0} ** SAMPLES;
+    for (0..SAMPLES) |n| {
+        raw_sound_wave[n] = @intFromFloat(std.math.maxInt(i16) * std.math.sin(2 * std.math.pi * SOUND_SAMPLE_FREQUENCY * @as(f32, @floatFromInt(n)) / SOUND_SAMPLE_RATE));
+    }
+
     var chip8: Chip8 = .{
         .state = .running,
         .memory = fonts ++ ([_]u8{0} ** (MEMORY_SIZE - fonts.len)),
@@ -376,6 +403,7 @@ pub fn initializeChip8(is_key_down_fn: *const fn (key: Keypad) bool, get_key_pre
         .framebuffer = getClearedFramebuffer(),
 
         .next_key_x = 0,
+        .raw_sound_wave = raw_sound_wave,
 
         .isKeyDown = is_key_down_fn,
         .getKeyPressed = get_key_pressed_fn,
@@ -384,14 +412,19 @@ pub fn initializeChip8(is_key_down_fn: *const fn (key: Keypad) bool, get_key_pre
 
     // This is a test program to validate the rendering to the screen is working as expected.
     // All it does is:
+    // - clears the screen;
+    // - set V6 = 255;
+    // - set ST = V6 (this should trigger the beep sound for ~4.25 seconds);
     // - wait for a key input;
     // - store that input in V5;
     // - set I to the location of the sprite for the digit stored in V5;
     // - set V0 and V1 to `0x10`;
     // - draw 5 bytes, starting from I, to (V0, V1);
     // - wait for another input (serves as a halting mechanism).
-    const rom: [14]u8 = .{
+    const rom: [18]u8 = .{
         0x00, 0xE0,
+        0x66, 0xFF,
+        0xF6, 0x18,
         0xF5, 0x0A,
         0xF5, 0x29,
         0x60, 0x10,
@@ -399,7 +432,7 @@ pub fn initializeChip8(is_key_down_fn: *const fn (key: Keypad) bool, get_key_pre
         0xD0, 0x15,
         0xF8, 0x0A,
     };
-    @memcpy(chip8.memory[0x200..0x20E], rom[0..14]);
+    @memcpy(chip8.memory[0x200..0x212], rom[0..18]);
 
     return chip8;
 }
