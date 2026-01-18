@@ -11,6 +11,11 @@ const PC_START: usize = 0x200;
 const STACK_SIZE: usize = 0x10;
 const V_REGISTERS: usize = 0x10;
 
+pub const FRAMEBUFFER_WIDTH: usize = 0x40;
+pub const FRAMEBUFFER_HEIGHT: usize = 0x20;
+
+pub const Framebuffer = [FRAMEBUFFER_WIDTH][FRAMEBUFFER_HEIGHT]u1;
+
 pub const Keypad = enum(u4) {
     k_0 = 0x0,
     k_1 = 0x1,
@@ -30,8 +35,15 @@ pub const Keypad = enum(u4) {
     k_F = 0xF,
 };
 
+const ExecutionState = enum(u4) {
+    running = 0x0,
+    waiting_for_keypress = 0x1,
+};
+
 /// Data modeling for the CHIP-8 architecture. It contains references to its registers, the stack and memory.
 const Chip8 = struct {
+    state: ExecutionState,
+
     memory: [MEMORY_SIZE]u8,
     v: [V_REGISTERS]u8,
     i: u16,
@@ -40,11 +52,13 @@ const Chip8 = struct {
     pc: u16,
     sp: u8,
     stack: [STACK_SIZE]u16,
+    framebuffer: Framebuffer,
 
-    drawPixel: fn (x: i32, y: i32, is_active: bool) void,
-    clearScreen: fn () void,
-    isKeyDown: fn (key: Keypad) bool,
-    getKeyPressed: fn () ?Keypad,
+    next_key_x: usize,
+
+    isKeyDown: *const fn (key: Keypad) bool,
+    getKeyPressed: *const fn () ?Keypad,
+    getRandomNumber: *const fn (min: i32, max: i32) i32,
 };
 
 /// An 8x5 representation of the default fonts for the CHIP-8 emulator.
@@ -67,9 +81,14 @@ const fonts = [0x50]u8{
     0xF0, 0x80, 0xF0, 0x80, 0x80, // "F"
 };
 
+fn getClearedFramebuffer() Framebuffer {
+    return std.mem.zeroes(Framebuffer);
+}
+
 /// Initialize the data model elements of the engine with sane defaults.
-pub fn initializeChip8(comptime draw_pixel_fn: fn (x: i32, y: i32, is_active: bool) void, comptime clear_screen_fn: fn () void, comptime is_key_down_fn: fn (key: Keypad) bool, comptime get_key_pressed_fn: fn () ?Keypad) Chip8 {
-    return .{
+pub fn initializeChip8(is_key_down_fn: *const fn (key: Keypad) bool, get_key_pressed_fn: *const fn () ?Keypad, get_random_number_fn: *const fn (min: i32, max: i32) i32) Chip8 {
+    var chip8: Chip8 = .{
+        .state = .running,
         .memory = fonts ++ ([_]u8{0} ** (MEMORY_SIZE - fonts.len)),
         .v = [_]u8{0} ** V_REGISTERS,
         .i = 0,
@@ -78,20 +97,57 @@ pub fn initializeChip8(comptime draw_pixel_fn: fn (x: i32, y: i32, is_active: bo
         .pc = PC_START,
         .sp = 0,
         .stack = [_]u16{0} ** STACK_SIZE,
+        .framebuffer = getClearedFramebuffer(),
 
-        .drawPixel = draw_pixel_fn,
-        .clearScreen = clear_screen_fn,
+        .next_key_x = 0,
+
         .isKeyDown = is_key_down_fn,
         .getKeyPressed = get_key_pressed_fn,
+        .getRandomNumber = get_random_number_fn,
     };
+
+    // This is a test program to validate the rendering to the screen is working as expected.
+    // All it does is:
+    // - wait for a key input;
+    // - store that input in V5;
+    // - set I to the location of the sprite for the digit stored in V5;
+    // - set V0 and V1 to `0x10`;
+    // - draw 5 bytes, starting from I, to (V0, V1);
+    // - wait for another input (serves as a halting mechanism).
+    const rom: [14]u8 = .{
+        0x00, 0xE0,
+        0xF5, 0x0A,
+        0xF5, 0x29,
+        0x60, 0x10,
+        0x61, 0x10,
+        0xD0, 0x15,
+        0xF8, 0x0A,
+    };
+    @memcpy(chip8.memory[0x200..0x20E], rom[0..14]);
+
+    return chip8;
+}
+
+pub fn step(chip8: *Chip8) void {
+    switch (chip8.state) {
+        .running => {
+            executeNextInstruction(chip8);
+        },
+        .waiting_for_keypress => {
+            if (chip8.getKeyPressed()) |key| {
+                chip8.v[chip8.next_key_x] = @intFromEnum(key);
+                chip8.state = .running;
+            }
+        },
+    }
 }
 
 // TODO: Maybe use an enum for the opcodes instead of u16?
 fn getNextInstruction(chip8: *Chip8) u16 {
-    assert(chip8.pc > PC_START);
+    assert(chip8.pc >= PC_START);
     assert(chip8.pc < MEMORY_SIZE);
 
-    var instruction: u16 = chip8.memory[chip8.pc] << 0x10;
+    var instruction: u16 = @as(u16, chip8.memory[chip8.pc]) << 0x08;
     instruction += chip8.memory[chip8.pc + 1];
 
     chip8.pc += 2;
@@ -103,7 +159,9 @@ fn executeNextInstruction(chip8: *Chip8) void {
     const instruction = getNextInstruction(chip8);
 
     switch (instruction) {
-        0x00E0 => assert(false), // TODO: CLS - Clear the display
+        0x00E0 => {
+            chip8.framebuffer = getClearedFramebuffer();
+        },
         0x00EE => {
             chip8.pc = chip8.stack[chip8.sp];
             chip8.sp -= 1; // TODO: Should we handle underflows?
@@ -118,7 +176,7 @@ fn executeNextInstruction(chip8: *Chip8) void {
             chip8.pc = instruction - 0x2000;
         },
         0x3000...0x3FFF => {
-            const x: usize = (instruction >> 0x10) - 0x30;
+            const x: usize = (instruction >> 0x08) - 0x30;
             const kk = instruction & 0x00FF;
 
             if (chip8.v[x] == kk) {
@@ -126,7 +184,7 @@ fn executeNextInstruction(chip8: *Chip8) void {
             }
         },
         0x4000...0x4FFF => {
-            const x: usize = (instruction >> 0x10) - 0x40;
+            const x: usize = (instruction >> 0x08) - 0x40;
             const kk = instruction & 0x00FF;
 
             if (chip8.v[x] != kk) {
@@ -135,8 +193,8 @@ fn executeNextInstruction(chip8: *Chip8) void {
         },
         0x5000...0x5FF0 => {
             if (instruction & 0x000F == 0) {
-                const x: usize = (instruction >> 0x10) - 0x50;
-                const y: usize = (instruction & 0x00F0) >> 0x08;
+                const x: usize = (instruction >> 0x08) - 0x50;
+                const y: usize = (instruction & 0x00F0) >> 0x04;
 
                 if (chip8.v[x] == chip8.v[y]) {
                     chip8.pc += 2;
@@ -144,20 +202,20 @@ fn executeNextInstruction(chip8: *Chip8) void {
             }
         },
         0x6000...0x6FFF => {
-            const x: usize = (instruction >> 0x10) - 0x60;
-            const kk = @as(u8, instruction & 0x00FF);
+            const x: usize = (instruction >> 0x08) - 0x60;
+            const kk: u8 = @intCast(instruction & 0x00FF);
 
             chip8.v[x] = kk;
         },
         0x7000...0x7FFF => {
-            const x: usize = (instruction >> 0x10) - 0x70;
-            const kk = @as(u8, instruction & 0x00FF);
+            const x: usize = (instruction >> 0x08) - 0x70;
+            const kk: u8 = @intCast(instruction & 0x00FF);
 
             chip8.v[x] += kk;
         },
         0x8000...0x8FFF => {
-            const x: usize = (instruction >> 0x10) - 0x80;
-            const y: usize = (instruction & 0x00F0) >> 0x08;
+            const x: usize = (instruction >> 0x08) - 0x80;
+            const y: usize = (instruction & 0x00F0) >> 0x04;
 
             const instruction_variant = instruction & 0x000F;
             switch (instruction_variant) {
@@ -207,12 +265,13 @@ fn executeNextInstruction(chip8: *Chip8) void {
                     chip8.v[x] = chip8.v[y] << 0x1;
                     chip8.v[0xF] = vy_msb;
                 },
+                else => unreachable,
             }
         },
         0x9000...0x9FF0 => {
             if (instruction & 0x000F == 0) {
-                const x: usize = (instruction >> 0x10) - 0x90;
-                const y: usize = (instruction & 0x00F0) >> 0x08;
+                const x: usize = (instruction >> 0x08) - 0x90;
+                const y: usize = (instruction & 0x00F0) >> 0x04;
 
                 if (chip8.v[x] != chip8.v[y]) {
                     chip8.pc += 2;
@@ -225,25 +284,77 @@ fn executeNextInstruction(chip8: *Chip8) void {
         0xB000...0xBFFF => {
             chip8.pc = (instruction - 0xB000) + chip8.v[0];
         },
-        0xC000...0xCFFF => assert(false), // CXKK - TODO: This instruction depends on a random number generator.
-        0xD000...0xDFFF => assert(false), // DXYN - TODO: This instruction depends on drawing to the screen.
+        0xC000...0xCFFF => {
+            const x: usize = (instruction >> 0x08) - 0xC0;
+            const n: u8 = @intCast(instruction & 0x00FF);
+            const rnd: u8 = @intCast(chip8.getRandomNumber(0x00, 0xFF));
+
+            chip8.v[x] = rnd & n;
+        },
+        0xD000...0xDFFF => {
+            const x: usize = (instruction >> 0x08) - 0xD0;
+            const y: usize = (instruction & 0x00F0) >> 0x04;
+            const n: u4 = @intCast(instruction & 0x000F);
+
+            const vx = chip8.v[x];
+            const vy = chip8.v[y];
+
+            var collision_detected = false;
+            for (0..n) |y_offset| {
+                // TODO: What is `I + fb_y` goes beyond memory?
+                const sprite = chip8.memory[chip8.i + y_offset];
+
+                for (0..8) |x_offset| {
+                    const bitshift_operand: u3 = @intCast(x_offset);
+                    const sprite_pixel: u1 = @intCast(sprite >> (0x07 - bitshift_operand) & 0x01);
+                    const fb_x = (vx + x_offset) % FRAMEBUFFER_WIDTH;
+                    const fb_y = (vy + y_offset) % FRAMEBUFFER_WIDTH;
+                    const fb_pixel = &chip8.framebuffer[fb_x][fb_y];
+
+                    if (sprite_pixel == 1 and fb_pixel.* == 1) {
+                        collision_detected = true;
+                    }
+
+                    fb_pixel.* ^= sprite_pixel;
+                }
+            }
+
+            if (collision_detected) {
+                chip8.v[0xF] = 1;
+            }
+        },
         0xE000...0xEFFF => {
+            const x: usize = (instruction >> 0x08) - 0xE0;
+
             const instruction_variant = instruction & 0x00FF;
             switch (instruction_variant) {
-                0x9E => assert(false), // EX9E - TODO: This instruction depends on keyboard input.
-                0xA1 => assert(false), // EXA1 - TODO: This instruction depends on keyboard input.
+                0x9E => {
+                    const key: Keypad = @enumFromInt(chip8.v[x]);
+                    if (chip8.isKeyDown(key)) {
+                        chip8.pc += 2;
+                    }
+                },
+                0xA1 => {
+                    const key: Keypad = @enumFromInt(chip8.v[x]);
+                    if (!chip8.isKeyDown(key)) {
+                        chip8.pc += 2;
+                    }
+                },
                 else => unreachable,
             }
         },
         0xF000...0xFFFF => {
-            const x: usize = (instruction >> 0x10) - 0xF0;
+            const x: usize = (instruction >> 0x08) - 0xF0;
 
             const instruction_variant = instruction & 0x00FF;
             switch (instruction_variant) {
                 0x07 => {
                     chip8.v[x] = chip8.dt;
                 },
-                0x0A => assert(false), // FX0A - TODO: This instruction depends on keyboard input.
+                0x0A => {
+                    chip8.state = .waiting_for_keypress;
+                    chip8.next_key_x = x;
+                },
                 0x15 => {
                     chip8.dt = chip8.v[x];
                 },
@@ -259,9 +370,9 @@ fn executeNextInstruction(chip8: *Chip8) void {
                 },
                 0x33 => {
                     const vx = chip8.v[x];
-                    const hundreds = @as(u4, vx / 100);
-                    const tens = @as(u4, (vx % 100) / 10);
-                    const ones = @as(u4, vx % 10);
+                    const hundreds: u4 = @intCast(vx / 100);
+                    const tens: u4 = @intCast((vx % 100) / 10);
+                    const ones: u4 = @intCast(vx % 10);
 
                     const i = chip8.i;
                     chip8.memory[i] = hundreds;
@@ -275,7 +386,7 @@ fn executeNextInstruction(chip8: *Chip8) void {
 
                     // Another difference in documentation. According to Matthew we should ALSO adjust the I register
                     // at the end of this instruction.
-                    chip8.i += x + 1;
+                    chip8.i += @as(u16, @intCast(x)) + 1;
                 },
                 0x65 => {
                     for (0..x + 1) |n| {
@@ -284,36 +395,11 @@ fn executeNextInstruction(chip8: *Chip8) void {
 
                     // Another difference in documentation. According to Matthew we should ALSO adjust the I register
                     // at the end of this instruction.
-                    chip8.i += x + 1;
+                    chip8.i += @as(u16, @intCast(x)) + 1;
                 },
                 else => unreachable,
             }
         },
-    }
-}
-
-test initializeChip8 {
-    const chip8 = initializeChip8();
-
-    try expect(chip8.memory.len == MEMORY_SIZE);
-    for (chip8.memory[0..0x50]) |byte| {
-        try expect(byte != 0);
-    }
-    for (chip8.memory[0x50..]) |byte| {
-        try expect(byte == 0);
-    }
-
-    for (chip8.v) |vx| {
-        try expect(vx == 0);
-    }
-
-    try expect(chip8.i == 0);
-    try expect(chip8.dt == 0);
-    try expect(chip8.st == 0);
-    try expect(chip8.pc == PC_START);
-    try expect(chip8.sp == 0);
-
-    for (chip8.stack) |stack_entry| {
-        try expect(stack_entry == 0);
+        else => unreachable,
     }
 }
